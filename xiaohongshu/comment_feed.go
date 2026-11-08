@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -22,8 +23,10 @@ func NewCommentFeedAction(page *rod.Page) *CommentFeedAction {
 
 // PostComment 发表评论到 Feed
 func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, content string) error {
-	// 不使用 Context(ctx)，避免继承外部 context 的超时
-	page := f.page.Timeout(60 * time.Second)
+	if strings.TrimSpace(content) == "" {
+		return commentNotSubmitted(fmt.Errorf("评论内容不能为空"))
+	}
+	page := f.page.Context(ctx).Timeout(90 * time.Second)
 
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("打开 feed 详情页: %s", url)
@@ -38,83 +41,71 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 		return err
 	}
 
-	elem, err := page.Element("div.input-box div.content-edit span")
-	if err != nil {
-		logrus.Warnf("Failed to find comment input box: %v", err)
-		return fmt.Errorf("未找到评论输入框，该帖子可能不支持评论或网页端不可访问: %w", err)
+	if err := activateFeedComposer(ctx, page); err != nil {
+		return commentNotSubmitted(err)
 	}
-
-	if err := humanize.Click(elem); err != nil {
-		logrus.Warnf("Failed to click comment input box: %v", err)
-		return fmt.Errorf("无法点击评论输入框: %w", err)
-	}
-	humanize.Delay(ctx, humanize.AfterClick)
-
-	elem2, err := page.Element("div.input-box div.content-edit p.content-input")
+	elem2, err := visibleCommentInput(ctx, func() (rod.Elements, error) { return page.Elements(feedComposerSelector) }, 5*time.Second)
 	if err != nil {
-		logrus.Warnf("Failed to find comment input field: %v", err)
-		return fmt.Errorf("未找到评论输入区域: %w", err)
+		return commentNotSubmitted(err)
+	}
+	placeholder, err := commentInputPlaceholder(elem2)
+	if err != nil {
+		return commentNotSubmitted(err)
+	}
+	if strings.HasPrefix(placeholder, "回复") || strings.HasPrefix(strings.ToLower(placeholder), "reply to") {
+		return commentNotSubmitted(fmt.Errorf("当前输入框处于回复模式，不会作为顶层评论提交"))
 	}
 
 	if err := humanize.Type(ctx, elem2, content); err != nil {
 		logrus.Warnf("Failed to input comment content: %v", err)
-		return fmt.Errorf("无法输入评论内容: %w", err)
+		return commentNotSubmitted(fmt.Errorf("无法输入评论内容: %w", err))
 	}
 
 	humanize.Delay(ctx, humanize.AfterType)
 
-	submitButton, err := page.Element("div.bottom button.submit")
+	submitButton, err := readyFeedSubmit(page)
 	if err != nil {
 		logrus.Warnf("Failed to find submit button: %v", err)
-		return fmt.Errorf("未找到提交按钮: %w", err)
+		return commentNotSubmitted(fmt.Errorf("未找到提交按钮: %w", err))
 	}
 
+	before, err := renderedComments(page)
+	if err != nil {
+		return commentNotSubmitted(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return commentNotSubmitted(err)
+	}
+	placeholder, err = commentInputPlaceholder(elem2)
+	if err != nil || strings.HasPrefix(placeholder, "回复") || strings.HasPrefix(strings.ToLower(placeholder), "reply to") {
+		return commentNotSubmitted(fmt.Errorf("提交前输入框目标发生变化，已中止"))
+	}
+	responses, stopWatching := watchCommentResponse(page, feedID, "", content)
+	defer stopWatching()
 	if err := humanize.Click(submitButton); err != nil {
 		logrus.Warnf("Failed to click submit button: %v", err)
-		return fmt.Errorf("无法点击提交按钮: %w", err)
+		return commentUnconfirmed(fmt.Errorf("发送点击未确认完成: %w", err))
 	}
 
 	humanize.Delay(ctx, humanize.AfterClick)
 
-	// 就地校验：提交后评论应在评论区渲染出现；未出现则判定失败，避免假成功。
-	if !waitCommentRendered(page, content, 4*time.Second) {
-		logrus.Warnf("评论提交后未在评论区渲染，判定未成功: feed=%s", feedID)
-		return fmt.Errorf("评论未确认成功：提交后未在评论区出现（可能账号被限制或发送失败），feed: %s", feedID)
+	if err := waitNewComment(ctx, page, before, content, "", responses, 10*time.Second); err != nil {
+		return err
 	}
 
 	logrus.Infof("Comment posted and verified to feed: %s", feedID)
 	return nil
 }
 
-// commentRendered 就地读当前页评论区 DOM，判断指定文本的评论是否已渲染出现。
-// 不重新导航、不滚动——只读已加载的 .comments-container 的可见文本。
-func commentRendered(page *rod.Page, content string) bool {
-	res, err := page.Eval(`(txt) => {
-		const c = document.querySelector('.comments-container');
-		return c ? c.innerText.includes(txt) : false;
-	}`, content)
-	if err != nil {
-		return false
-	}
-	return res.Value.Bool()
-}
-
-func waitCommentRendered(page *rod.Page, content string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if commentRendered(page, content) {
-			return true
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	return false
-}
-
 // ReplyToComment 回复指定评论
 func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToken, commentID, userID, content string) error {
-	// 增加超时时间，因为需要滚动查找评论
-	// 注意：不使用 Context(ctx)，避免继承外部 context 的超时
-	page := f.page.Timeout(5 * time.Minute)
+	if strings.TrimSpace(content) == "" {
+		return commentNotSubmitted(fmt.Errorf("回复内容不能为空"))
+	}
+	if commentID == "" && userID == "" {
+		return commentNotSubmitted(fmt.Errorf("缺少目标评论标识"))
+	}
+	page := f.page.Context(ctx).Timeout(5 * time.Minute)
 	url := makeFeedDetailURL(feedID, xsecToken)
 	logrus.Infof("打开 feed 详情页进行回复: %s", url)
 
@@ -141,6 +132,15 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	commentEl.MustScrollIntoView()
 	humanize.Delay(ctx, humanize.BetweenScroll)
 
+	nickname, err := feedReplyNickname(commentEl)
+	if err != nil {
+		return commentNotSubmitted(err)
+	}
+	threadValue, err := commentEl.Eval(`() => { const thread=this.closest('.parent-comment'); const first=thread && (thread.matches('.comment-item') ? thread : thread.querySelector('.comment-item')); return first ? (first.id || first.getAttribute('data-comment-id') || '') : (this.id || this.getAttribute('data-comment-id') || ''); }`)
+	if err != nil || threadValue.Value.Str() == "" {
+		return commentNotSubmitted(fmt.Errorf("无法确认目标评论所在楼层"))
+	}
+	threadID := threadValue.Value.Str()
 	logrus.Info("准备点击回复按钮")
 
 	// 查找并点击回复按钮
@@ -155,35 +155,51 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 
 	humanize.Delay(ctx, humanize.AfterClick)
 
-	// 查找回复输入框
-	inputEl, err := page.Element("div.input-box div.content-edit p.content-input")
+	inputEl, err := visibleCommentInput(ctx, func() (rod.Elements, error) { return page.Elements(feedComposerSelector) }, 5*time.Second)
 	if err != nil {
-		return fmt.Errorf("无法找到回复输入框: %w", err)
+		return commentNotSubmitted(err)
+	}
+	if err := verifyReplyTarget(inputEl, nickname); err != nil {
+		return commentNotSubmitted(err)
 	}
 
 	// 输入内容
 	if err := humanize.Type(ctx, inputEl, content); err != nil {
-		return fmt.Errorf("输入回复内容失败: %w", err)
+		return commentNotSubmitted(fmt.Errorf("输入回复内容失败: %w", err))
 	}
 
 	humanize.Delay(ctx, humanize.AfterType)
 
 	// 查找并点击提交按钮
-	submitBtn, err := page.Element("div.bottom button.submit")
+	submitBtn, err := readyFeedSubmit(page)
 	if err != nil {
-		return fmt.Errorf("无法找到提交按钮: %w", err)
+		return commentNotSubmitted(fmt.Errorf("无法找到提交按钮: %w", err))
 	}
 
+	if err := verifyReplyTarget(inputEl, nickname); err != nil {
+		return commentNotSubmitted(err)
+	}
+	before, err := renderedComments(page)
+	if err != nil {
+		return commentNotSubmitted(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return commentNotSubmitted(err)
+	}
+	targetValue, err := commentEl.Eval(`() => (this.id || this.getAttribute('data-comment-id') || '').replace(/^comment-/, '')`)
+	if err != nil || targetValue.Value.Str() == "" {
+		return commentNotSubmitted(fmt.Errorf("目标评论ID无法核实"))
+	}
+	responses, stopWatching := watchCommentResponse(page, feedID, targetValue.Value.Str(), content)
+	defer stopWatching()
 	if err := humanize.Click(submitBtn); err != nil {
-		return fmt.Errorf("点击提交按钮失败: %w", err)
+		return commentUnconfirmed(fmt.Errorf("回复发送点击未确认完成: %w", err))
 	}
 
 	humanize.Delay(ctx, humanize.AfterClick)
 
-	// 就地校验：回复应在评论区渲染出现，否则判定未成功。
-	if !waitCommentRendered(page, content, 4*time.Second) {
-		logrus.Warnf("回复提交后未在评论区渲染，判定未成功: feed=%s", feedID)
-		return fmt.Errorf("回复未确认成功：提交后未在评论区出现（可能账号被限制或发送失败）")
+	if err := waitNewComment(ctx, page, before, content, threadID, responses, 10*time.Second); err != nil {
+		return err
 	}
 
 	logrus.Infof("回复评论成功并已确认")

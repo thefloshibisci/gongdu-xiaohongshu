@@ -484,7 +484,7 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 		return nil, err
 	}
 
-	return &PostCommentResponse{FeedID: feedID, Success: true, Message: "评论发表成功"}, nil
+	return &PostCommentResponse{FeedID: feedID, Success: true, Status: "visible_to_current_account", PublicVisibility: "unverified", RetrySafe: false, Message: "刷新后当前账号可见；尚未核实其他账号可见，不要重复提交"}, nil
 }
 
 // LikeFeed 点赞笔记
@@ -562,11 +562,14 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	}
 
 	return &ReplyCommentResponse{
-		FeedID:          feedID,
-		TargetCommentID: commentID,
-		TargetUserID:    userID,
-		Success:         true,
-		Message:         "评论回复成功",
+		FeedID:           feedID,
+		TargetCommentID:  commentID,
+		TargetUserID:     userID,
+		Success:          true,
+		Message:          "刷新后当前账号可见；尚未核实其他账号可见，不要重复提交",
+		Status:           "visible_to_current_account",
+		PublicVisibility: "unverified",
+		RetrySafe:        false,
 	}, nil
 }
 

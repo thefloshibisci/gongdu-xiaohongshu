@@ -74,9 +74,12 @@ type PostCommentRequest struct {
 
 // PostCommentResponse 发表评论响应
 type PostCommentResponse struct {
-	FeedID  string `json:"feed_id"`
-	Success bool   `json:"success"`
-	Message string `json:"message"`
+	FeedID           string `json:"feed_id"`
+	Success          bool   `json:"success"`
+	Message          string `json:"message"`
+	Status           string `json:"status"`
+	PublicVisibility string `json:"public_visibility"`
+	RetrySafe        bool   `json:"retry_safe"`
 }
 
 // ReplyCommentRequest 回复评论请求
@@ -90,11 +93,14 @@ type ReplyCommentRequest struct {
 
 // ReplyCommentResponse 回复评论响应
 type ReplyCommentResponse struct {
-	FeedID          string `json:"feed_id"`
-	TargetCommentID string `json:"target_comment_id,omitempty"`
-	TargetUserID    string `json:"target_user_id,omitempty"`
-	Success         bool   `json:"success"`
-	Message         string `json:"message"`
+	FeedID           string `json:"feed_id"`
+	TargetCommentID  string `json:"target_comment_id,omitempty"`
+	TargetUserID     string `json:"target_user_id,omitempty"`
+	Success          bool   `json:"success"`
+	Message          string `json:"message"`
+	Status           string `json:"status"`
+	PublicVisibility string `json:"public_visibility"`
+	RetrySafe        bool   `json:"retry_safe"`
 }
 
 // UserProfileRequest 用户主页请求

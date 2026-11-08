@@ -645,7 +645,8 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 		}
 	}
 
-	resultText := fmt.Sprintf("评论发表成功 - Feed ID: %s", result.FeedID)
+	resultTextBytes, _ := json.Marshal(map[string]any{"status": "visible_to_current_account", "public_visibility": "unverified", "retry_safe": false, "feed_id": result.FeedID, "message": "刷新后当前登录账号可见；其他账号能否看到尚未确认，不要重复提交"})
+	resultText := string(resultTextBytes)
 	return &MCPToolResult{
 		Content: []MCPContent{{
 			Type: "text",
@@ -716,7 +717,8 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 		}
 	}
 
-	responseText := fmt.Sprintf("评论回复成功 - Feed ID: %s, Comment ID: %s, User ID: %s", result.FeedID, result.TargetCommentID, result.TargetUserID)
+	responseBytes, _ := json.Marshal(map[string]any{"status": "visible_to_current_account", "public_visibility": "unverified", "retry_safe": false, "feed_id": result.FeedID, "target_comment_id": result.TargetCommentID, "message": "刷新后当前登录账号可见；其他账号能否看到尚未确认，不要重复提交"})
+	responseText := string(responseBytes)
 	return &MCPToolResult{
 		Content: []MCPContent{{
 			Type: "text",

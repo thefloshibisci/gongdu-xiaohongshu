@@ -365,7 +365,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "post_comment_to_feed",
-			Description: "发表评论到小红书笔记",
+			Description: "发表评论到小红书笔记。仅用于独立的顶层评论；指定评论回复失败时不得改用此工具。返回 submitted_unconfirmed 表示可能已发出，必须先人工核查，不得自动重试。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Post Comment",
 				DestructiveHint: boolPtr(true),
@@ -386,7 +386,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "reply_comment_in_feed",
-			Description: "回复小红书笔记下的指定评论",
+			Description: "回复小红书笔记下的指定评论。无法确认目标或输入框时中止；不得改为顶层评论。返回 submitted_unconfirmed 表示可能已发出，必须先人工核查，不得自动重试。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Reply Comment",
 				DestructiveHint: boolPtr(true),
@@ -532,7 +532,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "reply_notification",
-			Description: "回复「评论和@」里的一条评论。comment_id 从 list_notifications 获取。适合处理收到的评论，无需先定位笔记。",
+			Description: "回复「评论和@」里的一条评论。comment_id 从 list_notifications 获取。适合处理收到的评论，无需先定位笔记。无法确认回复目标时中止，不得改发顶层评论；submitted_unconfirmed 表示可能已发送，先人工核查，不得自动重试。",
 			Annotations: &mcp.ToolAnnotations{
 				Title:           "Reply Notification",
 				DestructiveHint: boolPtr(true),
@@ -560,7 +560,8 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 18)
+	registerFollowTools(server, appServer)
+	logrus.Infof("Registered %d MCP tools", 20)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

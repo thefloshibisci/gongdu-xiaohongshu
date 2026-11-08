@@ -13,10 +13,14 @@ import (
 
 // NotificationReplyResult 通知回复的结果。
 type NotificationReplyResult struct {
-	CommentID string `json:"comment_id"`
-	Nickname  string `json:"nickname"`
-	FeedID    string `json:"feed_id,omitempty"`
-	Content   string `json:"content"`
+	CommentID        string `json:"comment_id"`
+	TargetCommentID  string `json:"target_comment_id"`
+	Status           string `json:"status"`
+	PublicVisibility string `json:"public_visibility"`
+	RetrySafe        bool   `json:"retry_safe"`
+	Nickname         string `json:"nickname"`
+	FeedID           string `json:"feed_id,omitempty"`
+	Content          string `json:"content"`
 }
 
 // Reply 回复一条评论。
@@ -28,7 +32,7 @@ func (n *NotificationAction) Reply(ctx context.Context, commentID, content strin
 		return nil, fmt.Errorf("回复内容不能为空")
 	}
 
-	page := n.page.Timeout(3 * time.Minute)
+	page := n.page.Context(ctx).Timeout(3 * time.Minute)
 
 	page.MustNavigate("https://www.xiaohongshu.com/notification").MustWaitLoad()
 	humanize.Delay(ctx, humanize.AfterNavigate)
@@ -46,6 +50,11 @@ func (n *NotificationAction) Reply(ctx context.Context, commentID, content strin
 		return nil, fmt.Errorf("通知条目渲染数(%d)少于目标位置(%d)，页面可能未加载完", len(items), index)
 	}
 	item := items[index]
+	// State-list and DOM ordering can diverge; do not reply to an unrelated row.
+	itemText, err := item.Text()
+	if err != nil || target.from().Nickname == "" || target.Comment.Content == "" || !strings.Contains(itemText, target.from().Nickname) || !strings.Contains(itemText, target.Comment.Content) {
+		return nil, commentNotSubmitted(fmt.Errorf("通知条目与目标评论不符，无法安全定位回复"))
+	}
 
 	humanize.Delay(ctx, humanize.Reading)
 
@@ -60,13 +69,13 @@ func (n *NotificationAction) Reply(ctx context.Context, commentID, content strin
 	}
 	humanize.Delay(ctx, humanize.AfterClick)
 
-	input, err := item.Element(`textarea.comment-input`)
+	input, err := visibleCommentInput(ctx, func() (rod.Elements, error) { return item.Elements(notificationComposerSelector) }, 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("回复输入框未出现: %w", err)
+		return nil, commentNotSubmitted(fmt.Errorf("回复输入框未出现: %w", err))
 	}
 
 	if err := verifyReplyTarget(input, target.from().Nickname); err != nil {
-		return nil, err
+		return nil, commentNotSubmitted(err)
 	}
 
 	if err := humanize.Type(ctx, input, content); err != nil {
@@ -80,11 +89,32 @@ func (n *NotificationAction) Reply(ctx context.Context, commentID, content strin
 	}
 
 	humanize.Delay(ctx, humanize.BeforeSubmit)
+	if err := verifyReplyTarget(input, target.from().Nickname); err != nil {
+		return nil, commentNotSubmitted(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, commentNotSubmitted(err)
+	}
+	responses, stopWatching := watchCommentResponse(page, target.Item.ID, commentID, content)
+	defer stopWatching()
 	if err := humanize.Click(submit); err != nil {
-		return nil, fmt.Errorf("无法点击发送: %w", err)
+		return nil, commentUnconfirmed(fmt.Errorf("无法确认发送点击: %w", err))
 	}
 
-	if err := waitReplyAccepted(item, 8*time.Second); err != nil {
+	newID, err := waitCommentAcknowledgement(ctx, responses, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if target.Item.ID == "" || target.Item.XsecToken == "" {
+		return nil, commentUnconfirmed(fmt.Errorf("接口已接收，但没有可用于复核的笔记链接"))
+	}
+	if err := page.Navigate(makeFeedDetailURL(target.Item.ID, target.Item.XsecToken)); err != nil {
+		return nil, commentUnconfirmed(err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return nil, commentUnconfirmed(err)
+	}
+	if err := waitPersistedComment(ctx, page, nil, content, "", newID, 10*time.Second); err != nil {
 		return nil, err
 	}
 
@@ -92,10 +122,14 @@ func (n *NotificationAction) Reply(ctx context.Context, commentID, content strin
 
 	logrus.Infof("通知回复成功: comment=%s", commentID)
 	return &NotificationReplyResult{
-		CommentID: commentID,
-		Nickname:  target.from().Nickname,
-		FeedID:    target.Item.ID,
-		Content:   content,
+		CommentID:        newID,
+		TargetCommentID:  commentID,
+		Status:           "visible_to_current_account",
+		PublicVisibility: "unverified",
+		RetrySafe:        false,
+		Nickname:         target.from().Nickname,
+		FeedID:           target.Item.ID,
+		Content:          content,
 	}, nil
 }
 
@@ -137,25 +171,12 @@ func (n *NotificationAction) locate(ctx context.Context, page *rod.Page, comment
 
 // verifyReplyTarget 用输入框的 placeholder 核对回复对象。
 func verifyReplyTarget(input *rod.Element, nickname string) error {
-	placeholder, err := input.Attribute("placeholder")
-	if err != nil || placeholder == nil {
+	placeholder, err := commentInputPlaceholder(input)
+	if err != nil || placeholder == "" {
 		return fmt.Errorf("读不到回复框提示文字，无法确认回复对象，已中止")
 	}
-	if nickname != "" && !strings.Contains(*placeholder, nickname) {
-		return fmt.Errorf("回复对象不符：期望 %q，实际提示为 %q，已中止", nickname, *placeholder)
+	if !replyPlaceholderMatches(placeholder, nickname) {
+		return fmt.Errorf("回复对象不符：期望 %q，实际提示为 %q，已中止", nickname, placeholder)
 	}
 	return nil
-}
-
-// waitReplyAccepted 等待回复提交完成。
-func waitReplyAccepted(item *rod.Element, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		has, _, err := item.Has(`textarea.comment-input`)
-		if err == nil && !has {
-			return nil
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	return fmt.Errorf("回复未确认成功：发送后输入框仍未收起（可能被限制或发送失败）")
 }

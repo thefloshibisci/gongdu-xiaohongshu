@@ -1,3 +1,5 @@
+> **共度自用维护版**：基于上游 v2.7.0，包含橘瓣共度使用的评论发送、回复和关注修复。版本来源、已有验证与部署说明见 [共度维护说明](README_GONGDU.md)。
+
 # xiaohongshu-mcp
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
